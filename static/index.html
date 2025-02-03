@@ -2,116 +2,194 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Collaborative Synth / Step Sequencer</title>
+  <title>Collaborative Synth / Step Sequencer with Effects</title>
+  <!-- Import Google Font -->
+  <link href="https://fonts.googleapis.com/css?family=Roboto:400,700&display=swap" rel="stylesheet">
   <style>
-    /* Container for horizontal scrolling */
-    .grid-container {
-      overflow-x: auto;
-      border: 1px solid #ccc;
-      padding: 5px;
+    /* Global Styles */
+    body {
+      font-family: 'Roboto', sans-serif;
+      margin: 20px;
+      background-color: #121212;
+      color: #eee;
     }
-    /* Grid styling: 64 columns of 30px each */
-    .grid {
+    h1 {
+      text-align: center;
+      margin-bottom: 10px;
+    }
+    p {
+      text-align: center;
+      margin-bottom: 20px;
+      font-size: 14px;
+      color: #ccc;
+    }
+    /* Controls */
+    #controls {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    #controls label {
+      margin-right: 15px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #controls input[type="checkbox"] {
+      margin-right: 5px;
+    }
+    /* Sequencer Container */
+    #sequencer {
+      overflow-x: auto;
+      padding: 10px;
+      background-color: #1e1e1e;
+      border: 1px solid #333;
+      border-radius: 8px;
+      max-width: 100%;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+    }
+    /* Instrument Row Layout */
+    .instrument-row {
+      display: grid;
+      grid-template-columns: 120px auto;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .instrument-label {
+      text-align: right;
+      font-weight: 700;
+      padding-right: 10px;
+      font-size: 16px;
+    }
+    .instrument-grid {
       display: grid;
       grid-template-columns: repeat(64, 30px);
-      grid-auto-rows: 30px;
-      grid-gap: 2px;
+      grid-gap: 4px;
     }
+    /* Grid Cell Styles */
     .cell {
-      background: lightgray;
-      border: 1px solid #ccc;
+      width: 30px;
+      height: 30px;
+      background-color: #2d2d2d;
+      border: 1px solid #444;
+      border-radius: 4px;
       cursor: pointer;
+      transition: background 0.2s, box-shadow 0.2s;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 10px;
-      user-select: none;
+      position: relative;
     }
     .cell.active {
-      background: green;
-      color: white;
+      background-color: #00e676;
+      box-shadow: 0 0 8px #00e676;
     }
-    /* Highlight the current column with a red border */
-    .cell.current {
-      border: 2px solid red;
+    .cell:hover {
+      box-shadow: 0 0 8px rgba(0, 230, 118, 0.5);
+    }
+    /* Current Column Highlight */
+    .cell.current::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border: 2px solid #ff4081;
+      border-radius: 4px;
+      box-sizing: border-box;
+      pointer-events: none;
     }
   </style>
 </head>
 <body>
   <h1>Collaborative Synth / Step Sequencer</h1>
   <p>Click a cell to toggle it. Changes are shared in real time with all connected users.</p>
-  <div class="grid-container">
-    <div class="grid" id="grid">
-      <!-- Cells will be created dynamically -->
-    </div>
+
+  <!-- Effects Controls -->
+  <div id="controls">
+    <label>
+      <input type="checkbox" id="filterToggle"> Enable Filter
+    </label>
+    <label>
+      <input type="checkbox" id="reverbToggle"> Enable Reverb
+    </label>
+  </div>
+
+  <!-- Sequencer Container -->
+  <div id="sequencer">
+    <!-- Instrument rows will be generated dynamically -->
   </div>
 
   <script>
-    // Create the Audio Context
+    // ============================================
+    // Audio Setup & Effects
+    // ============================================
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
-    // Define the instrument rows (synths)
-    const rowNames = ["lead", "brass", "keys", "drums", "claps", "hihat", "bass", "bells", "percussion"];
-    const rows = rowNames.length;
-    const cols = 64;  // 64 columns (steps)
+    // Global effect toggles
+    let filterEnabled = false;
+    let reverbEnabled = false;
 
-    // Sequencer timing: 100 BPM (quarter note = 60/100 = 0.6 sec)
-    // Assuming 16th-note resolution, each step lasts 0.6/4 = 0.15 seconds.
-    const BPM = 100;
-    const secondsPerBeat = 60 / BPM;
-    const stepInterval = secondsPerBeat / 4;  // 16th notes
+    // Set up control event listeners for effects
+    document.getElementById("filterToggle").addEventListener("change", function() {
+      filterEnabled = this.checked;
+    });
+    document.getElementById("reverbToggle").addEventListener("change", function() {
+      reverbEnabled = this.checked;
+    });
 
-    // Create a 2D grid state: rows x columns, initially all false (inactive)
-    let gridState = [];
-    const gridElement = document.getElementById("grid");
+    // Create a simple impulse response for reverb (2 seconds, decay factor 2)
+    function createReverbImpulseResponse(duration, decay) {
+      const sampleRate = audioContext.sampleRate;
+      const length = sampleRate * duration;
+      const impulse = audioContext.createBuffer(2, length, sampleRate);
+      for (let channel = 0; channel < 2; channel++) {
+        const impulseChannel = impulse.getChannelData(channel);
+        for (let i = 0; i < length; i++) {
+          impulseChannel[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+        }
+      }
+      return impulse;
+    }
 
-    // Generate grid cells and initialize state
-    for (let i = 0; i < rows; i++) {
-      gridState[i] = [];
-      for (let j = 0; j < cols; j++) {
-        gridState[i][j] = false;
-        const cell = document.createElement("div");
-        cell.classList.add("cell");
-        cell.dataset.row = i;
-        cell.dataset.col = j;
-        // (Optional) Uncomment to show the step number:
-        // cell.innerText = j;
-        cell.addEventListener("click", () => {
-          // Toggle cell state on click
-          gridState[i][j] = !gridState[i][j];
-          cell.classList.toggle("active", gridState[i][j]);
-          // Send the change to the server so all clients stay in sync.
-          const message = {
-            type: "toggle",
-            row: i,
-            col: j,
-            value: gridState[i][j]
-          };
-          ws.send(JSON.stringify(message));
-        });
-        gridElement.appendChild(cell);
+    // Global reverb convolver node; connect it permanently to the destination.
+    const reverbNode = audioContext.createConvolver();
+    reverbNode.buffer = createReverbImpulseResponse(2.0, 2.0);
+    reverbNode.connect(audioContext.destination);
+
+    // Helper function to build the effects chain and connect to destination.
+    // Given a source gain node, we conditionally insert a filter and/or route through reverb.
+    function connectEffects(gainNode, time) {
+      let outputNode = gainNode;
+      if (filterEnabled) {
+        const filterNode = audioContext.createBiquadFilter();
+        filterNode.type = 'lowpass';
+        filterNode.frequency.setValueAtTime(800, time); // Cutoff frequency
+        outputNode.connect(filterNode);
+        outputNode = filterNode;
+      }
+      if (reverbEnabled) {
+        // Connect to the reverb node. (Reverb node is already connected to the destination.)
+        outputNode.connect(reverbNode);
+      } else {
+        outputNode.connect(audioContext.destination);
       }
     }
 
-    // ----------------------------
-    // Web Audio API helper functions
-    // ----------------------------
-
-    // Play an oscillator sound with a quick decay envelope.
+    // Play an oscillator sound with an envelope and applied effects.
     function playOscillator(time, frequency, waveform, duration = 0.1) {
       const osc = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
       osc.frequency.setValueAtTime(frequency, time);
       osc.type = waveform;
       osc.connect(gainNode);
-      gainNode.connect(audioContext.destination);
       gainNode.gain.setValueAtTime(1, time);
       gainNode.gain.exponentialRampToValueAtTime(0.001, time + duration);
+      connectEffects(gainNode, time);
       osc.start(time);
       osc.stop(time + duration);
     }
 
-    // Play a burst of white noise.
+    // Play a burst of white noise with an envelope and applied effects.
     function playNoise(time, duration = 0.1, volume = 0.3) {
       const bufferSize = audioContext.sampleRate * duration;
       const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
@@ -123,15 +201,14 @@
       noise.buffer = buffer;
       const gainNode = audioContext.createGain();
       noise.connect(gainNode);
-      gainNode.connect(audioContext.destination);
       gainNode.gain.setValueAtTime(volume, time);
       gainNode.gain.exponentialRampToValueAtTime(0.001, time + duration);
+      connectEffects(gainNode, time);
       noise.start(time);
       noise.stop(time + duration);
     }
 
-    // Play the sound corresponding to an instrument.
-    // (The parameters here are rudimentary and can be expanded for richer synthesis.)
+    // Play the instrument sound based on the instrument name.
     function playInstrument(instrument, time) {
       switch(instrument) {
         case "lead":
@@ -167,43 +244,105 @@
       }
     }
 
-    // ----------------------------
-    // Sequencer Scheduler
-    // ----------------------------
+    // ============================================
+    // Sequencer Grid & UI Setup
+    // ============================================
+    // Instruments (rows)
+    const rowNames = ["lead", "brass", "keys", "drums", "claps", "hihat", "bass", "bells", "percussion"];
+    const rows = rowNames.length;
+    const cols = 64;  // 64 steps per instrument
 
+    // Sequencer timing: 100 BPM (quarter note = 60/100 = 0.6 sec)
+    // With 16th-note resolution, each step lasts 0.6/4 = 0.15 seconds.
+    const BPM = 100;
+    const secondsPerBeat = 60 / BPM;
+    const stepInterval = secondsPerBeat / 4;  // 16th note duration
+
+    // Grid state: a 2D array [row][col] (all initially false)
+    const gridState = [];
+    // Create the sequencer rows in the UI.
+    const sequencerElement = document.getElementById("sequencer");
+
+    for (let i = 0; i < rows; i++) {
+      gridState[i] = [];
+      
+      // Create a container for this instrument row.
+      const rowDiv = document.createElement("div");
+      rowDiv.classList.add("instrument-row");
+
+      // Create and append the label.
+      const labelDiv = document.createElement("div");
+      labelDiv.classList.add("instrument-label");
+      labelDiv.innerText = rowNames[i];
+      rowDiv.appendChild(labelDiv);
+
+      // Create the grid container for the 64 cells.
+      const rowGrid = document.createElement("div");
+      rowGrid.classList.add("instrument-grid");
+
+      for (let j = 0; j < cols; j++) {
+        gridState[i][j] = false;
+        const cell = document.createElement("div");
+        cell.classList.add("cell");
+        cell.dataset.row = i;
+        cell.dataset.col = j;
+        // Optionally, display the step number:
+        // cell.innerText = j;
+        cell.addEventListener("click", () => {
+          // Toggle cell state on click.
+          gridState[i][j] = !gridState[i][j];
+          cell.classList.toggle("active", gridState[i][j]);
+          // Send the change to the server so all clients stay in sync.
+          const message = {
+            type: "toggle",
+            row: i,
+            col: j,
+            value: gridState[i][j]
+          };
+          ws.send(JSON.stringify(message));
+        });
+        rowGrid.appendChild(cell);
+      }
+      rowDiv.appendChild(rowGrid);
+      sequencerElement.appendChild(rowDiv);
+    }
+
+    // ============================================
+    // Sequencer Scheduler
+    // ============================================
     let currentStep = 0;
     function scheduler() {
       const currentTime = audioContext.currentTime;
-      // For each row, if the cell at the current step is active, trigger its sound.
+      // For each instrument row, check if the cell at currentStep is active.
       for (let row = 0; row < rows; row++) {
         if (gridState[row][currentStep]) {
           playInstrument(rowNames[row], currentTime);
         }
       }
-      // Update the UI to highlight the current column.
+      // Update the UI: highlight the current column.
       highlightColumn(currentStep);
-      // Advance to the next step, wrapping around at the end.
+      // Advance to the next step (wrap around at the end).
       currentStep = (currentStep + 1) % cols;
     }
 
-    // Highlight the current column in the UI.
+    // Highlight the cells in the current column.
     function highlightColumn(step) {
+      // Remove "current" class from all cells.
       document.querySelectorAll('.cell').forEach(cell => {
-        if (parseInt(cell.dataset.col) === step) {
-          cell.classList.add('current');
-        } else {
-          cell.classList.remove('current');
-        }
+        cell.classList.remove('current');
+      });
+      // Add "current" class to cells with matching data-col.
+      document.querySelectorAll(`.cell[data-col="${step}"]`).forEach(cell => {
+        cell.classList.add('current');
       });
     }
 
-    // Start the sequencer. (Using setInterval for simplicity;
-    // for higher timing accuracy you might consider a more sophisticated scheduler.)
+    // Start the scheduler.
     setInterval(scheduler, stepInterval * 1000);
 
-    // ----------------------------
+    // ============================================
     // WebSocket for Collaborative Sync
-    // ----------------------------
+    // ============================================
     const ws = new WebSocket("ws://" + window.location.host + "/ws");
 
     ws.onopen = function() {
@@ -215,7 +354,7 @@
       if (message.type === "toggle") {
         const { row, col, value } = message;
         gridState[row][col] = value;
-        // Update all cells matching these coordinates.
+        // Update all matching cells in the UI.
         document.querySelectorAll(`.cell[data-row="${row}"][data-col="${col}"]`)
           .forEach(cell => {
             cell.classList.toggle("active", value);
