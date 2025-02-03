@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Collaborative Synth / Step Sequencer</title>
+  <style>
+    /* Container for horizontal scrolling */
+    .grid-container {
+      overflow-x: auto;
+      border: 1px solid #ccc;
+      padding: 5px;
+    }
+    /* Grid styling: 64 columns of 30px each */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(64, 30px);
+      grid-auto-rows: 30px;
+      grid-gap: 2px;
+    }
+    .cell {
+      background: lightgray;
+      border: 1px solid #ccc;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      user-select: none;
+    }
+    .cell.active {
+      background: green;
+      color: white;
+    }
+    /* Highlight the current column with a red border */
+    .cell.current {
+      border: 2px solid red;
+    }
+  </style>
+</head>
+<body>
+  <h1>Collaborative Synth / Step Sequencer</h1>
+  <p>Click a cell to toggle it. Changes are shared in real time with all connected users.</p>
+  <div class="grid-container">
+    <div class="grid" id="grid">
+      <!-- Cells will be created dynamically -->
+    </div>
+  </div>
+
+  <script>
+    // Create the Audio Context
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Define the instrument rows (synths)
+    const rowNames = ["lead", "brass", "keys", "drums", "claps", "hihat", "bass", "bells", "percussion"];
+    const rows = rowNames.length;
+    const cols = 64;  // 64 columns (steps)
+
+    // Sequencer timing: 100 BPM (quarter note = 60/100 = 0.6 sec)
+    // Assuming 16th-note resolution, each step lasts 0.6/4 = 0.15 seconds.
+    const BPM = 100;
+    const secondsPerBeat = 60 / BPM;
+    const stepInterval = secondsPerBeat / 4;  // 16th notes
+
+    // Create a 2D grid state: rows x columns, initially all false (inactive)
+    let gridState = [];
+    const gridElement = document.getElementById("grid");
+
+    // Generate grid cells and initialize state
+    for (let i = 0; i < rows; i++) {
+      gridState[i] = [];
+      for (let j = 0; j < cols; j++) {
+        gridState[i][j] = false;
+        const cell = document.createElement("div");
+        cell.classList.add("cell");
+        cell.dataset.row = i;
+        cell.dataset.col = j;
+        // (Optional) Uncomment to show the step number:
+        // cell.innerText = j;
+        cell.addEventListener("click", () => {
+          // Toggle cell state on click
+          gridState[i][j] = !gridState[i][j];
+          cell.classList.toggle("active", gridState[i][j]);
+          // Send the change to the server so all clients stay in sync.
+          const message = {
+            type: "toggle",
+            row: i,
+            col: j,
+            value: gridState[i][j]
+          };
+          ws.send(JSON.stringify(message));
+        });
+        gridElement.appendChild(cell);
+      }
+    }
+
+    // ----------------------------
+    // Web Audio API helper functions
+    // ----------------------------
+
+    // Play an oscillator sound with a quick decay envelope.
+    function playOscillator(time, frequency, waveform, duration = 0.1) {
+      const osc = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      osc.frequency.setValueAtTime(frequency, time);
+      osc.type = waveform;
+      osc.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      gainNode.gain.setValueAtTime(1, time);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, time + duration);
+      osc.start(time);
+      osc.stop(time + duration);
+    }
+
+    // Play a burst of white noise.
+    function playNoise(time, duration = 0.1, volume = 0.3) {
+      const bufferSize = audioContext.sampleRate * duration;
+      const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      const noise = audioContext.createBufferSource();
+      noise.buffer = buffer;
+      const gainNode = audioContext.createGain();
+      noise.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      gainNode.gain.setValueAtTime(volume, time);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, time + duration);
+      noise.start(time);
+      noise.stop(time + duration);
+    }
+
+    // Play the sound corresponding to an instrument.
+    // (The parameters here are rudimentary and can be expanded for richer synthesis.)
+    function playInstrument(instrument, time) {
+      switch(instrument) {
+        case "lead":
+          playOscillator(time, 440, "sawtooth", 0.15);
+          break;
+        case "brass":
+          playOscillator(time, 330, "square", 0.15);
+          break;
+        case "keys":
+          playOscillator(time, 523, "triangle", 0.15);
+          break;
+        case "drums":
+          // A simple kick-like sound (low sine wave)
+          playOscillator(time, 100, "sine", 0.2);
+          break;
+        case "claps":
+          playNoise(time, 0.1, 0.5);
+          break;
+        case "hihat":
+          playNoise(time, 0.05, 0.3);
+          break;
+        case "bass":
+          playOscillator(time, 110, "sine", 0.2);
+          break;
+        case "bells":
+          playOscillator(time, 660, "sine", 0.2);
+          break;
+        case "percussion":
+          playOscillator(time, 220, "sine", 0.15);
+          break;
+        default:
+          break;
+      }
+    }
+
+    // ----------------------------
+    // Sequencer Scheduler
+    // ----------------------------
+
+    let currentStep = 0;
+    function scheduler() {
+      const currentTime = audioContext.currentTime;
+      // For each row, if the cell at the current step is active, trigger its sound.
+      for (let row = 0; row < rows; row++) {
+        if (gridState[row][currentStep]) {
+          playInstrument(rowNames[row], currentTime);
+        }
+      }
+      // Update the UI to highlight the current column.
+      highlightColumn(currentStep);
+      // Advance to the next step, wrapping around at the end.
+      currentStep = (currentStep + 1) % cols;
+    }
+
+    // Highlight the current column in the UI.
+    function highlightColumn(step) {
+      document.querySelectorAll('.cell').forEach(cell => {
+        if (parseInt(cell.dataset.col) === step) {
+          cell.classList.add('current');
+        } else {
+          cell.classList.remove('current');
+        }
+      });
+    }
+
+    // Start the sequencer. (Using setInterval for simplicity;
+    // for higher timing accuracy you might consider a more sophisticated scheduler.)
+    setInterval(scheduler, stepInterval * 1000);
+
+    // ----------------------------
+    // WebSocket for Collaborative Sync
+    // ----------------------------
+    const ws = new WebSocket("ws://" + window.location.host + "/ws");
+
+    ws.onopen = function() {
+      console.log("Connected to the WebSocket server.");
+    };
+
+    ws.onmessage = function(event) {
+      const message = JSON.parse(event.data);
+      if (message.type === "toggle") {
+        const { row, col, value } = message;
+        gridState[row][col] = value;
+        // Update all cells matching these coordinates.
+        document.querySelectorAll(`.cell[data-row="${row}"][data-col="${col}"]`)
+          .forEach(cell => {
+            cell.classList.toggle("active", value);
+          });
+      }
+    };
+
+    ws.onclose = function() {
+      console.log("Disconnected from the WebSocket server.");
+    };
+  </script>
+</body>
+</html>
+
