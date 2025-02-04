@@ -3,23 +3,22 @@
 # ---------------------------
 # Build Stage
 # ---------------------------
-FROM golang:1.20-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
-# Install git (if required by your go.mod dependencies)
+# Install git if needed by dependencies.
 RUN apk update && apk add --no-cache git
 
-# Set working directory
+# Set the working directory.
 WORKDIR /app
 
-# Copy go.mod and go.sum, download dependencies.
+# Copy go.mod and go.sum, then download dependencies.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source code.
+# Copy the remaining source code.
 COPY . .
 
-# Build the Go binary.
-# Using CGO_ENABLED=0 to produce a fully static binary.
+# Build the Go binary with CGO disabled.
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
 
 # ---------------------------
@@ -27,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
 # ---------------------------
 FROM alpine:latest
 
-# Install CA certificates for HTTPS support (if needed).
+# Install CA certificates for HTTPS support.
 RUN apk --no-cache add ca-certificates
 
 # Set working directory.
@@ -37,7 +36,7 @@ WORKDIR /root/
 COPY --from=builder /app/app .
 COPY --from=builder /app/static ./static
 
-# Expose the port the app listens on.
+# Expose the port that the application listens on.
 EXPOSE 8080
 
 # Start the application.
