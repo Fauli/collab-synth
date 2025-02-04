@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -15,6 +17,14 @@ const (
 	numCols = 64
 )
 
+// Parameters holds global synthesis parameters.
+type Parameters struct {
+	FilterCutoff float64 `json:"filterCutoff"`
+	FilterQ      float64 `json:"filterQ"`
+	ReverbDecay  float64 `json:"reverbDecay"`
+	Volume       float64 `json:"volume"`
+}
+
 // --- WebSocket Upgrade Configuration ---
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -23,15 +33,18 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// Message is used for JSON message parsing.
+// Message represents incoming/outgoing messages.
 type Message struct {
-	Type  string `json:"type"`
-	Row   int    `json:"row,omitempty"`
-	Col   int    `json:"col,omitempty"`
-	Value bool   `json:"value,omitempty"`
+	Type       string  `json:"type"`
+	Row        int     `json:"row,omitempty"`
+	Col        int     `json:"col,omitempty"`
+	Value      bool    `json:"value,omitempty"`
+	Param      string  `json:"param,omitempty"`
+	ParamValue float64 `json:"paramValue,omitempty"`
+	UserColor  string  `json:"userColor,omitempty"`
 }
 
-// InboundMessage wraps an incoming message along with the client that sent it.
+// InboundMessage wraps an incoming message with its originating client.
 type InboundMessage struct {
 	client *Client
 	data   []byte
@@ -39,8 +52,9 @@ type InboundMessage struct {
 
 // --- Client Structure ---
 type Client struct {
-	conn *websocket.Conn
-	send chan []byte
+	conn  *websocket.Conn
+	send  chan []byte
+	color string
 }
 
 // --- Hub Structure ---
@@ -50,9 +64,10 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	boardState [][]bool
+	params     Parameters
 }
 
-// newHub initializes a new hub and creates an empty board state.
+// newHub initializes a new hub with an empty board and default parameters.
 func newHub() *Hub {
 	h := &Hub{
 		clients:    make(map[*Client]bool),
@@ -60,6 +75,12 @@ func newHub() *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		boardState: make([][]bool, numRows),
+		params: Parameters{
+			FilterCutoff: 800,
+			FilterQ:      1.0,
+			ReverbDecay:  2.0,
+			Volume:       1.0,
+		},
 	}
 	for i := 0; i < numRows; i++ {
 		h.boardState[i] = make([]bool, numCols)
@@ -67,19 +88,29 @@ func newHub() *Hub {
 	return h
 }
 
-// run listens for register, unregister, and inbound message events.
+// randomColor generates a random hex color code.
+func randomColor() string {
+	r := rand.Intn(256)
+	g := rand.Intn(256)
+	b := rand.Intn(256)
+	return fmt.Sprintf("#%02X%02X%02X", r, g, b)
+}
+
+// run listens for register, unregister, and inbound messages.
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			// Immediately send the current board state to the new client.
+			// Send current board state and parameters.
 			initMsg := struct {
 				Type      string     `json:"type"`
 				GridState [][]bool   `json:"gridState"`
+				Params    Parameters `json:"params"`
 			}{
 				Type:      "init",
 				GridState: h.boardState,
+				Params:    h.params,
 			}
 			if data, err := json.Marshal(initMsg); err != nil {
 				log.Println("Error marshaling init message:", err)
@@ -106,24 +137,24 @@ func (h *Hub) run() {
 				if msg.Row >= 0 && msg.Row < numRows && msg.Col >= 0 && msg.Col < numCols {
 					h.boardState[msg.Row][msg.Col] = msg.Value
 				}
-				// Broadcast the toggle message to all clients.
-				for client := range h.clients {
-					select {
-					case client.send <- im.data:
-					default:
-						close(client.send)
-						delete(h.clients, client)
-					}
+				// Set the user color from the originating client.
+				msg.UserColor = im.client.color
+				// Marshal the modified message.
+				if data, err := json.Marshal(msg); err != nil {
+					log.Println("Error marshaling toggle message:", err)
+				} else {
+					h.broadcast(data)
 				}
 
 			case "get_state":
-				// Send the current board state only to the requesting client.
 				initMsg := struct {
 					Type      string     `json:"type"`
 					GridState [][]bool   `json:"gridState"`
+					Params    Parameters `json:"params"`
 				}{
 					Type:      "init",
 					GridState: h.boardState,
+					Params:    h.params,
 				}
 				if data, err := json.Marshal(initMsg); err != nil {
 					log.Println("Error marshaling init message:", err)
@@ -131,22 +162,53 @@ func (h *Hub) run() {
 					im.client.send <- data
 				}
 
-			default:
-				// For other message types, broadcast them.
-				for client := range h.clients {
-					select {
-					case client.send <- im.data:
-					default:
-						close(client.send)
-						delete(h.clients, client)
-					}
+			case "set_param":
+				// Update parameter based on msg.Param.
+				switch msg.Param {
+				case "filterCutoff":
+					h.params.FilterCutoff = msg.ParamValue
+				case "filterQ":
+					h.params.FilterQ = msg.ParamValue
+				case "reverbDecay":
+					h.params.ReverbDecay = msg.ParamValue
+				case "volume":
+					h.params.Volume = msg.ParamValue
 				}
+				// Broadcast new parameter state.
+				paramMsg := struct {
+					Type   string     `json:"type"`
+					Params Parameters `json:"params"`
+				}{
+					Type:   "param_update",
+					Params: h.params,
+				}
+				if data, err := json.Marshal(paramMsg); err != nil {
+					log.Println("Error marshaling param update:", err)
+				} else {
+					h.broadcast(data)
+				}
+
+			default:
+				// For any other message types, broadcast.
+				h.broadcast(im.data)
 			}
 		}
 	}
 }
 
-// readPump reads messages from the client and sends them to hub.inbound.
+// broadcast sends data to all connected clients.
+func (h *Hub) broadcast(data []byte) {
+	for client := range h.clients {
+		select {
+		case client.send <- data:
+		default:
+			close(client.send)
+			delete(h.clients, client)
+		}
+	}
+}
+
+// readPump reads messages from a client and sends them to hub.inbound.
 func (c *Client) readPump(hub *Hub) {
 	defer func() {
 		hub.unregister <- c
@@ -161,7 +223,7 @@ func (c *Client) readPump(hub *Hub) {
 	}
 }
 
-// writePump writes messages from the hub to the client.
+// writePump writes messages from the hub to a client.
 func (c *Client) writePump() {
 	defer c.conn.Close()
 	for message := range c.send {
@@ -178,7 +240,13 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		log.Println("WebSocket upgrade error:", err)
 		return
 	}
-	client := &Client{conn: conn, send: make(chan []byte, 256)}
+	// Seed random generator (ideally do this once in main or init).
+	rand.Seed(time.Now().UnixNano())
+	client := &Client{
+		conn:  conn,
+		send:  make(chan []byte, 256),
+		color: randomColor(),
+	}
 	hub.register <- client
 
 	go client.writePump()
@@ -189,12 +257,11 @@ func main() {
 	hub := newHub()
 	go hub.run()
 
-	// WebSocket endpoint.
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(hub, w, r)
 	})
 
-	// Serve static files (your frontend) from the "static" directory.
+	// Serve static files (frontend).
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 
 	fmt.Println("Server started on :8080")

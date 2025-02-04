@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Collaborative Synth / Step Sequencer with Effects</title>
+  <title>Collaborative Synth / Step Sequencer with Parameters</title>
   <!-- Import Google Font -->
   <link href="https://fonts.googleapis.com/css?family=Roboto:400,700&display=swap" rel="stylesheet">
   <style>
@@ -24,17 +24,25 @@
       color: #ccc;
     }
     /* Controls */
-    #controls, #loop-control {
+    #controls, #loop-control, #params {
       text-align: center;
       margin-bottom: 20px;
     }
-    #controls label, #loop-control label {
+    #controls label, #loop-control label, #params label {
       margin-right: 15px;
       font-size: 14px;
       cursor: pointer;
     }
     #controls input[type="checkbox"] {
       margin-right: 5px;
+    }
+    /* Parameter slider styles */
+    #params label {
+      display: inline-block;
+      margin: 0 10px;
+    }
+    #params input[type="range"] {
+      vertical-align: middle;
     }
     /* Sequencer Container */
     #sequencer {
@@ -78,7 +86,7 @@
       justify-content: center;
       position: relative;
     }
-    /* Every 4th cell (columns 1, 5, 9, …) gets a slightly different background */
+    /* Every 4th cell gets a slightly different background */
     .instrument-grid .cell:nth-child(4n+1):not(.active) {
       background-color: #383838;
     }
@@ -102,13 +110,30 @@
       box-sizing: border-box;
       pointer-events: none;
     }
-    /* Dim cells that are outside the selected loop length */
+    /* Dim cells outside the current loop length */
     .cell.disabled {
       opacity: 0.3;
+    }
+    /* Overlay to unlock audio */
+    #startOverlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(0, 0, 0, 0.85);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      z-index: 9999;
+      cursor: pointer;
     }
   </style>
 </head>
 <body>
+  <div id="startOverlay">Tap to Start Audio</div>
   <h1>Collaborative Synth / Step Sequencer</h1>
   <p>Click a cell to toggle it. Changes are shared in real time with all connected users.</p>
 
@@ -133,14 +158,43 @@
     </select>
   </div>
 
+  <!-- Parameter Automation Controls -->
+  <div id="params">
+    <label>
+      Filter Cutoff: <span id="filterCutoffValue">800</span> Hz
+      <input type="range" id="filterCutoff" min="100" max="5000" step="10" value="800">
+    </label>
+    <label>
+      Filter Q: <span id="filterQValue">1.0</span>
+      <input type="range" id="filterQ" min="0.5" max="10" step="0.1" value="1.0">
+    </label>
+    <label>
+      Reverb Decay: <span id="reverbDecayValue">2.0</span> s
+      <input type="range" id="reverbDecay" min="0.5" max="5" step="0.1" value="2.0">
+    </label>
+    <label>
+      Volume: <span id="volumeValue">1.0</span>
+      <input type="range" id="volume" min="0" max="1" step="0.01" value="1.0">
+    </label>
+  </div>
+
   <!-- Sequencer Container -->
   <div id="sequencer">
     <!-- Instrument rows will be generated dynamically -->
   </div>
 
   <script>
+    // --- Unlock Audio on User Gesture ---
+    const startOverlay = document.getElementById("startOverlay");
+    startOverlay.addEventListener("click", () => {
+      // Resume the audio context.
+      audioContext.resume().then(() => {
+        startOverlay.style.display = "none";
+      });
+    });
+
     // ============================================
-    // Audio Setup & Effects
+    // Audio Setup & Effects with Parameter Automation
     // ============================================
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
@@ -148,7 +202,18 @@
     let filterEnabled = false;
     let reverbEnabled = false;
 
-    // Set up control event listeners for effects
+    // Global parameters with default values.
+    let filterCutoff = 800;
+    let filterQ = 1.0;
+    let reverbDecay = 2.0;
+    let volume = 1.0;
+
+    // Create a master gain node for volume control.
+    const masterGain = audioContext.createGain();
+    masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
+    masterGain.connect(audioContext.destination);
+
+    // Set up control event listeners for effects.
     document.getElementById("filterToggle").addEventListener("change", function() {
       filterEnabled = this.checked;
     });
@@ -156,7 +221,64 @@
       reverbEnabled = this.checked;
     });
 
-    // Create a simple impulse response for reverb (2 seconds, decay factor 2)
+    // Parameter controls.
+    const filterCutoffSlider = document.getElementById("filterCutoff");
+    const filterQSlider = document.getElementById("filterQ");
+    const reverbDecaySlider = document.getElementById("reverbDecay");
+    const volumeSlider = document.getElementById("volume");
+
+    // Display spans.
+    const filterCutoffValueSpan = document.getElementById("filterCutoffValue");
+    const filterQValueSpan = document.getElementById("filterQValue");
+    const reverbDecayValueSpan = document.getElementById("reverbDecayValue");
+    const volumeValueSpan = document.getElementById("volumeValue");
+
+    // When parameters change, update globals, UI, audio nodes, and notify others.
+    function updateParam(param, value) {
+      switch(param) {
+        case "filterCutoff":
+          filterCutoff = value;
+          filterCutoffValueSpan.innerText = value;
+          break;
+        case "filterQ":
+          filterQ = value;
+          filterQValueSpan.innerText = value;
+          break;
+        case "reverbDecay":
+          reverbDecay = value;
+          reverbDecayValueSpan.innerText = value;
+          // Rebuild the impulse response for the reverb.
+          reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
+          break;
+        case "volume":
+          volume = value;
+          volumeValueSpan.innerText = value;
+          masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
+          break;
+      }
+      // Send parameter update to backend.
+      const msg = {
+        type: "set_param",
+        param: param,
+        paramValue: value
+      };
+      ws.send(JSON.stringify(msg));
+    }
+
+    filterCutoffSlider.addEventListener("input", (e) => {
+      updateParam("filterCutoff", parseFloat(e.target.value));
+    });
+    filterQSlider.addEventListener("input", (e) => {
+      updateParam("filterQ", parseFloat(e.target.value));
+    });
+    reverbDecaySlider.addEventListener("input", (e) => {
+      updateParam("reverbDecay", parseFloat(e.target.value));
+    });
+    volumeSlider.addEventListener("input", (e) => {
+      updateParam("volume", parseFloat(e.target.value));
+    });
+
+    // Create a simple impulse response for reverb.
     function createReverbImpulseResponse(duration, decay) {
       const sampleRate = audioContext.sampleRate;
       const length = sampleRate * duration;
@@ -170,29 +292,30 @@
       return impulse;
     }
 
-    // Global reverb convolver node; connect it permanently to the destination.
+    // Global reverb node.
     const reverbNode = audioContext.createConvolver();
-    reverbNode.buffer = createReverbImpulseResponse(2.0, 2.0);
-    reverbNode.connect(audioContext.destination);
+    reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
+    reverbNode.connect(masterGain);
 
-    // Helper function to build the effects chain and connect to destination.
+    // Helper function to build the effects chain.
     function connectEffects(gainNode, time) {
       let outputNode = gainNode;
       if (filterEnabled) {
         const filterNode = audioContext.createBiquadFilter();
         filterNode.type = 'lowpass';
-        filterNode.frequency.setValueAtTime(800, time);
+        filterNode.frequency.setValueAtTime(filterCutoff, time);
+        filterNode.Q.setValueAtTime(filterQ, time);
         outputNode.connect(filterNode);
         outputNode = filterNode;
       }
       if (reverbEnabled) {
         outputNode.connect(reverbNode);
       } else {
-        outputNode.connect(audioContext.destination);
+        outputNode.connect(masterGain);
       }
     }
 
-    // Play an oscillator sound with an envelope and applied effects.
+    // Play an oscillator sound with envelope and applied effects.
     function playOscillator(time, frequency, waveform, duration = 0.1) {
       const osc = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
@@ -206,8 +329,8 @@
       osc.stop(time + duration);
     }
 
-    // Play a burst of white noise with an envelope and applied effects.
-    function playNoise(time, duration = 0.1, volume = 0.3) {
+    // Play a burst of white noise with envelope and applied effects.
+    function playNoise(time, duration = 0.1, vol = 0.3) {
       const bufferSize = audioContext.sampleRate * duration;
       const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
       const data = buffer.getChannelData(0);
@@ -218,14 +341,14 @@
       noise.buffer = buffer;
       const gainNode = audioContext.createGain();
       noise.connect(gainNode);
-      gainNode.gain.setValueAtTime(volume, time);
+      gainNode.gain.setValueAtTime(vol, time);
       gainNode.gain.exponentialRampToValueAtTime(0.001, time + duration);
       connectEffects(gainNode, time);
       noise.start(time);
       noise.stop(time + duration);
     }
 
-    // Play the instrument sound based on its name.
+    // Play instrument sounds.
     function playInstrument(instrument, time) {
       switch(instrument) {
         case "lead":
@@ -267,33 +390,45 @@
     }
 
     // ============================================
-    // Sequencer Grid & UI Setup
+    // Sequencer Grid & UI Setup (Board State)
     // ============================================
-    // Instruments (rows) including the two new instruments.
     const rowNames = [
       "lead", "brass", "keys", "drums", "claps",
       "hihat", "bass", "bells", "percussion",
       "Kick", "plucks"
     ];
     const rows = rowNames.length;
-    const cols = 64;  // The grid always has 64 columns
+    const cols = 64; // The grid always has 64 columns
 
-    // Sequencer timing: 100 BPM → 0.6 sec per beat, 0.15 sec per 16th note.
     const BPM = 100;
     const secondsPerBeat = 60 / BPM;
-    const stepInterval = secondsPerBeat / 4;  // 16th-note duration
+    const stepInterval = secondsPerBeat / 4; // 16th note duration
 
-    // Loop length control – only steps 0..(loopLength-1) will be played.
-    let loopLength = 64;
+    // Loop Length Control – default to 64.
     const loopLengthSelect = document.getElementById("loopLength");
+    // Explicitly set the dropdown's value to "64" on page load.
+    loopLengthSelect.value = "64";
+    let loopLength = parseInt(loopLengthSelect.value);
+    
     loopLengthSelect.addEventListener("change", function() {
       loopLength = parseInt(this.value);
       updateLoopColumns();
     });
 
-    // Grid state: a 2D array [row][col] (all initially false)
+    function updateLoopColumns() {
+      document.querySelectorAll('.cell').forEach(cell => {
+        const col = parseInt(cell.dataset.col);
+        if (col >= loopLength) {
+          cell.classList.add("disabled");
+        } else {
+          cell.classList.remove("disabled");
+        }
+      });
+    }
+    updateLoopColumns();
+
+    // Create a 2D grid state (initially all false) and build the UI.
     const gridState = [];
-    // Create the sequencer rows in the UI.
     const sequencerElement = document.getElementById("sequencer");
     for (let i = 0; i < rows; i++) {
       gridState[i] = [];
@@ -314,33 +449,19 @@
         cell.addEventListener("click", () => {
           gridState[i][j] = !gridState[i][j];
           cell.classList.toggle("active", gridState[i][j]);
-          // Broadcast the change.
-          const message = {
+          const msg = {
             type: "toggle",
             row: i,
             col: j,
             value: gridState[i][j]
           };
-          ws.send(JSON.stringify(message));
+          ws.send(JSON.stringify(msg));
         });
         rowGrid.appendChild(cell);
       }
       rowDiv.appendChild(rowGrid);
       sequencerElement.appendChild(rowDiv);
     }
-    // Mark columns outside the current loop length as disabled.
-    function updateLoopColumns() {
-      document.querySelectorAll('.cell').forEach(cell => {
-        const col = parseInt(cell.dataset.col);
-        if (col >= loopLength) {
-          cell.classList.add("disabled");
-        } else {
-          cell.classList.remove("disabled");
-        }
-      });
-    }
-    // Initial update so that if loopLength is less than 64, the extra columns are dimmed.
-    updateLoopColumns();
 
     // ============================================
     // Sequencer Scheduler
@@ -372,29 +493,67 @@
     const ws = new WebSocket("ws://" + window.location.host + "/ws");
     ws.onopen = function() {
       console.log("Connected to the WebSocket server.");
-      // Request the current board state.
       ws.send(JSON.stringify({ type: "get_state" }));
     };
     ws.onmessage = function(event) {
       const message = JSON.parse(event.data);
       if (message.type === "init") {
-        // Initialize the gridState with the state sent by the server.
+        // Initialize board state and parameters.
         for (let i = 0; i < rows; i++) {
           gridState[i] = message.gridState[i];
         }
-        // Update the UI for each cell.
         document.querySelectorAll('.cell').forEach(cell => {
           const row = parseInt(cell.dataset.row);
           const col = parseInt(cell.dataset.col);
           cell.classList.toggle("active", gridState[row][col]);
         });
+        if (message.params) {
+          filterCutoff = message.params.filterCutoff;
+          filterQ = message.params.filterQ;
+          reverbDecay = message.params.reverbDecay;
+          volume = message.params.volume;
+          filterCutoffSlider.value = filterCutoff;
+          filterCutoffValueSpan.innerText = filterCutoff;
+          filterQSlider.value = filterQ;
+          filterQValueSpan.innerText = filterQ;
+          reverbDecaySlider.value = reverbDecay;
+          reverbDecayValueSpan.innerText = reverbDecay;
+          volumeSlider.value = volume;
+          volumeValueSpan.innerText = volume;
+          masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
+          reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
+        }
       } else if (message.type === "toggle") {
-        const { row, col, value } = message;
+        const { row, col, value, userColor } = message;
         gridState[row][col] = value;
         document.querySelectorAll(`.cell[data-row="${row}"][data-col="${col}"]`)
           .forEach(cell => {
             cell.classList.toggle("active", value);
+            if (userColor) {
+              cell.style.border = `2px solid ${userColor}`;
+              setTimeout(() => {
+                cell.style.border = "";
+              }, 1000);
+            }
           });
+      } else if (message.type === "param_update") {
+        const params = message.params;
+        if (params) {
+          filterCutoff = params.filterCutoff;
+          filterQ = params.filterQ;
+          reverbDecay = params.reverbDecay;
+          volume = params.volume;
+          filterCutoffSlider.value = filterCutoff;
+          filterCutoffValueSpan.innerText = filterCutoff;
+          filterQSlider.value = filterQ;
+          filterQValueSpan.innerText = filterQ;
+          reverbDecaySlider.value = reverbDecay;
+          reverbDecayValueSpan.innerText = reverbDecay;
+          volumeSlider.value = volume;
+          volumeValueSpan.innerText = volume;
+          masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
+          reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
+        }
       }
     };
     ws.onclose = function() {
