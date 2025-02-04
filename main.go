@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -8,12 +9,32 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Constants for board dimensions.
+const (
+	numRows = 11
+	numCols = 64
+)
+
 // --- WebSocket Upgrade Configuration ---
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// In a production app, you’ll want to restrict allowed origins
+	// In production, restrict allowed origins.
 	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// Message is used for JSON message parsing.
+type Message struct {
+	Type  string `json:"type"`
+	Row   int    `json:"row,omitempty"`
+	Col   int    `json:"col,omitempty"`
+	Value bool   `json:"value,omitempty"`
+}
+
+// InboundMessage wraps an incoming message along with the client that sent it.
+type InboundMessage struct {
+	client *Client
+	data   []byte
 }
 
 // --- Client Structure ---
@@ -25,27 +46,46 @@ type Client struct {
 // --- Hub Structure ---
 type Hub struct {
 	clients    map[*Client]bool
-	broadcast  chan []byte
+	inbound    chan InboundMessage
 	register   chan *Client
 	unregister chan *Client
+	boardState [][]bool
 }
 
-// newHub initializes a new hub.
+// newHub initializes a new hub and creates an empty board state.
 func newHub() *Hub {
-	return &Hub{
+	h := &Hub{
 		clients:    make(map[*Client]bool),
-		broadcast:  make(chan []byte),
+		inbound:    make(chan InboundMessage),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		boardState: make([][]bool, numRows),
 	}
+	for i := 0; i < numRows; i++ {
+		h.boardState[i] = make([]bool, numCols)
+	}
+	return h
 }
 
-// run listens for register, unregister, and broadcast events.
+// run listens for register, unregister, and inbound message events.
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
+			// Immediately send the current board state to the new client.
+			initMsg := struct {
+				Type      string     `json:"type"`
+				GridState [][]bool   `json:"gridState"`
+			}{
+				Type:      "init",
+				GridState: h.boardState,
+			}
+			if data, err := json.Marshal(initMsg); err != nil {
+				log.Println("Error marshaling init message:", err)
+			} else {
+				client.send <- data
+			}
 
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
@@ -53,22 +93,60 @@ func (h *Hub) run() {
 				close(client.send)
 			}
 
-		case message := <-h.broadcast:
-			for client := range h.clients {
-				select {
-				case client.send <- message:
-					// Message queued successfully.
-				default:
-					// If sending fails (e.g., the channel is blocked), remove the client.
-					close(client.send)
-					delete(h.clients, client)
+		case im := <-h.inbound:
+			var msg Message
+			if err := json.Unmarshal(im.data, &msg); err != nil {
+				log.Println("Error decoding message:", err)
+				continue
+			}
+
+			switch msg.Type {
+			case "toggle":
+				// Update board state.
+				if msg.Row >= 0 && msg.Row < numRows && msg.Col >= 0 && msg.Col < numCols {
+					h.boardState[msg.Row][msg.Col] = msg.Value
+				}
+				// Broadcast the toggle message to all clients.
+				for client := range h.clients {
+					select {
+					case client.send <- im.data:
+					default:
+						close(client.send)
+						delete(h.clients, client)
+					}
+				}
+
+			case "get_state":
+				// Send the current board state only to the requesting client.
+				initMsg := struct {
+					Type      string     `json:"type"`
+					GridState [][]bool   `json:"gridState"`
+				}{
+					Type:      "init",
+					GridState: h.boardState,
+				}
+				if data, err := json.Marshal(initMsg); err != nil {
+					log.Println("Error marshaling init message:", err)
+				} else {
+					im.client.send <- data
+				}
+
+			default:
+				// For other message types, broadcast them.
+				for client := range h.clients {
+					select {
+					case client.send <- im.data:
+					default:
+						close(client.send)
+						delete(h.clients, client)
+					}
 				}
 			}
 		}
 	}
 }
 
-// readPump reads messages from the client and forwards them to the hub.
+// readPump reads messages from the client and sends them to hub.inbound.
 func (c *Client) readPump(hub *Hub) {
 	defer func() {
 		hub.unregister <- c
@@ -79,8 +157,7 @@ func (c *Client) readPump(hub *Hub) {
 		if err != nil {
 			break
 		}
-		// Broadcast the received message to all clients.
-		hub.broadcast <- message
+		hub.inbound <- InboundMessage{client: c, data: message}
 	}
 }
 
@@ -104,7 +181,6 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client := &Client{conn: conn, send: make(chan []byte, 256)}
 	hub.register <- client
 
-	// Start goroutines for reading from and writing to the client.
 	go client.writePump()
 	client.readPump(hub)
 }
