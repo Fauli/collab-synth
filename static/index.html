@@ -104,7 +104,7 @@
     .instrument-grid .cell:nth-child(4n+1):not(.active) {
       background-color: #383838;
     }
-    /* We remove the fixed green from .cell.active and rely on inline styles */
+    /* Remove static green; active cells use inline background color from user */
     .cell.active {
       box-shadow: 0 0 8px currentColor;
     }
@@ -169,7 +169,7 @@
     </label>
   </div>
 
-  <!-- Loop Length Control: Default is now 8 -->
+  <!-- Loop Length Control: Default is 8 -->
   <div id="loop-control">
     <label for="loopLength">Loop Length:</label>
     <select id="loopLength">
@@ -251,8 +251,7 @@
             const col = cell.dataset.col;
             if (gridState[row] && gridState[row][col]) {
               cell.classList.add("active");
-              // Set the background color to the user's color if available.
-              // (The init message does not include userColor, so leave it as default.)
+              // The init message doesn't include userColor, so leave background as-is.
             } else {
               cell.classList.remove("active");
               cell.style.backgroundColor = "";
@@ -290,7 +289,7 @@
                 cell.classList.remove("active");
                 cell.style.backgroundColor = "";
               }
-              // Also show a transient glowing rim in the userColor.
+              // Also show a transient glowing rim in the user's color.
               if (userColor) {
                 cell.style.border = `2px solid ${userColor}`;
                 setTimeout(() => {
@@ -551,8 +550,7 @@
         }
       });
     }
-    updateLoopColumns();
-
+    
     // Build the gridState array and UI.
     const gridState = [];
     const sequencerElement = document.getElementById("sequencer");
@@ -574,13 +572,8 @@
         cell.dataset.row = i;
         cell.dataset.col = j;
         cell.addEventListener("click", () => {
-          // Do not update the UI immediately; wait for the server's broadcast.
-          const msg = {
-            type: "toggle",
-            row: i,
-            col: j,
-            value: !gridState[i][j]
-          };
+          const newValue = !gridState[i][j];
+          const msg = { type: "toggle", row: i, col: j, value: newValue };
           ws.send(JSON.stringify(msg));
         });
         rowGrid.appendChild(cell);
@@ -588,6 +581,8 @@
       rowDiv.appendChild(rowGrid);
       sequencerElement.appendChild(rowDiv);
     }
+    // Call updateLoopColumns after the grid has been built.
+    updateLoopColumns();
 
     // ---------------------------
     // Sequencer Scheduler
@@ -604,10 +599,12 @@
       currentStep = (currentStep + 1) % loopLength;
     }
     function highlightColumn(step) {
+      // Remove current highlight from all cells.
       document.querySelectorAll('.cell').forEach(cell => {
         cell.classList.remove('current');
       });
-      document.querySelectorAll(`.cell[data-col="${step.toString()}"]`).forEach(cell => {
+      // Only highlight cells that are not disabled.
+      document.querySelectorAll(`.cell:not(.disabled)[data-col="${step.toString()}"]`).forEach(cell => {
         cell.classList.add('current');
       });
     }
