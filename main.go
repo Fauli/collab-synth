@@ -36,9 +36,9 @@ var upgrader = websocket.Upgrader{
 // Message represents incoming/outgoing messages.
 type Message struct {
 	Type       string  `json:"type"`
-	Row        int     `json:"row,omitempty"`
-	Col        int     `json:"col,omitempty"`
-	Value      bool    `json:"value,omitempty"`
+	Row        int     `json:"row"`
+	Col        int     `json:"col"`
+	Value      bool    `json:"value"`
 	Param      string  `json:"param,omitempty"`
 	ParamValue float64 `json:"paramValue,omitempty"`
 	UserColor  string  `json:"userColor,omitempty"`

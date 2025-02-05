@@ -133,6 +133,7 @@
   </style>
 </head>
 <body>
+  <!-- Overlay to unlock audio -->
   <div id="startOverlay">Tap to Start Audio</div>
   <h1>Collaborative Synth / Step Sequencer</h1>
   <p>Click a cell to toggle it. Changes are shared in real time with all connected users.</p>
@@ -184,36 +185,132 @@
   </div>
 
   <script>
-    // --- Unlock Audio on User Gesture ---
+    // ---------------------------
+    // Global Declarations and Initialization
+    // ---------------------------
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    let ws;  // Global WebSocket variable
+
+    // ---------------------------
+    // Initialize WebSocket Connection
+    // ---------------------------
+    function initWebSocket() {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(protocol + "//" + window.location.host + "/ws");
+
+      ws.onopen = function() {
+        console.log("Connected to the WebSocket server.");
+        ws.send(JSON.stringify({ type: "get_state" }));
+      };
+
+      ws.onmessage = function(event) {
+        const message = JSON.parse(event.data);
+        if (message.type === "init") {
+          // Initialize board state and parameters.
+          for (let i = 0; i < rows; i++) {
+            gridState[i] = message.gridState[i];
+          }
+          document.querySelectorAll('.cell').forEach(cell => {
+            const row = cell.dataset.row.toString();
+            const col = cell.dataset.col.toString();
+            // Safety check: ensure gridState[row] exists.
+            if (!gridState[row]) {
+              gridState[row] = new Array(cols).fill(false);
+            }
+            if (gridState[row][col]) {
+              cell.classList.add("active");
+            } else {
+              cell.classList.remove("active");
+            }
+          });
+          if (message.params) {
+            filterCutoff = message.params.filterCutoff;
+            filterQ = message.params.filterQ;
+            reverbDecay = message.params.reverbDecay;
+            volume = message.params.volume;
+            filterCutoffSlider.value = filterCutoff;
+            filterCutoffValueSpan.innerText = filterCutoff;
+            filterQSlider.value = filterQ;
+            filterQValueSpan.innerText = filterQ;
+            reverbDecaySlider.value = reverbDecay;
+            reverbDecayValueSpan.innerText = reverbDecay;
+            volumeSlider.value = volume;
+            volumeValueSpan.innerText = volume;
+            masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
+            reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
+          }
+        } else if (message.type === "toggle") {
+          const { row, col, value, userColor } = message;
+          // Ensure gridState[row] exists.
+          if (!gridState[row.toString()]) {
+            gridState[row.toString()] = new Array(cols).fill(false);
+          }
+          gridState[row.toString()][col.toString()] = value;
+          document.querySelectorAll(`.cell[data-row="${row.toString()}"][data-col="${col.toString()}"]`)
+            .forEach(cell => {
+              if (value) {
+                cell.classList.add("active");
+              } else {
+                cell.classList.remove("active");
+              }
+              if (userColor) {
+                cell.style.border = `2px solid ${userColor}`;
+                setTimeout(() => {
+                  cell.style.border = "";
+                }, 1000);
+              }
+            });
+        } else if (message.type === "param_update") {
+          const params = message.params;
+          if (params) {
+            filterCutoff = params.filterCutoff;
+            filterQ = params.filterQ;
+            reverbDecay = params.reverbDecay;
+            volume = params.volume;
+            filterCutoffSlider.value = filterCutoff;
+            filterCutoffValueSpan.innerText = filterCutoff;
+            filterQSlider.value = filterQ;
+            filterQValueSpan.innerText = filterQ;
+            reverbDecaySlider.value = reverbDecay;
+            reverbDecayValueSpan.innerText = reverbDecay;
+            volumeSlider.value = volume;
+            volumeValueSpan.innerText = volume;
+            masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
+            reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
+          }
+        }
+      };
+
+      ws.onclose = function() {
+        console.log("Disconnected from the WebSocket server.");
+      };
+    }
+    initWebSocket();
+
+    // ---------------------------
+    // Unlock Audio on User Gesture
+    // ---------------------------
     const startOverlay = document.getElementById("startOverlay");
     startOverlay.addEventListener("click", () => {
-      // Resume the audio context.
       audioContext.resume().then(() => {
         startOverlay.style.display = "none";
       });
     });
 
-    // ============================================
+    // ---------------------------
     // Audio Setup & Effects with Parameter Automation
-    // ============================================
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-
-    // Global effect toggles
+    // ---------------------------
     let filterEnabled = false;
     let reverbEnabled = false;
-
-    // Global parameters with default values.
     let filterCutoff = 800;
     let filterQ = 1.0;
     let reverbDecay = 2.0;
     let volume = 1.0;
 
-    // Create a master gain node for volume control.
     const masterGain = audioContext.createGain();
     masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
     masterGain.connect(audioContext.destination);
 
-    // Set up control event listeners for effects.
     document.getElementById("filterToggle").addEventListener("change", function() {
       filterEnabled = this.checked;
     });
@@ -221,19 +318,16 @@
       reverbEnabled = this.checked;
     });
 
-    // Parameter controls.
     const filterCutoffSlider = document.getElementById("filterCutoff");
     const filterQSlider = document.getElementById("filterQ");
     const reverbDecaySlider = document.getElementById("reverbDecay");
     const volumeSlider = document.getElementById("volume");
 
-    // Display spans.
     const filterCutoffValueSpan = document.getElementById("filterCutoffValue");
     const filterQValueSpan = document.getElementById("filterQValue");
     const reverbDecayValueSpan = document.getElementById("reverbDecayValue");
     const volumeValueSpan = document.getElementById("volumeValue");
 
-    // When parameters change, update globals, UI, audio nodes, and notify others.
     function updateParam(param, value) {
       switch(param) {
         case "filterCutoff":
@@ -247,7 +341,6 @@
         case "reverbDecay":
           reverbDecay = value;
           reverbDecayValueSpan.innerText = value;
-          // Rebuild the impulse response for the reverb.
           reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
           break;
         case "volume":
@@ -256,7 +349,6 @@
           masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
           break;
       }
-      // Send parameter update to backend.
       const msg = {
         type: "set_param",
         param: param,
@@ -278,7 +370,6 @@
       updateParam("volume", parseFloat(e.target.value));
     });
 
-    // Create a simple impulse response for reverb.
     function createReverbImpulseResponse(duration, decay) {
       const sampleRate = audioContext.sampleRate;
       const length = sampleRate * duration;
@@ -292,12 +383,10 @@
       return impulse;
     }
 
-    // Global reverb node.
     const reverbNode = audioContext.createConvolver();
     reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
     reverbNode.connect(masterGain);
 
-    // Helper function to build the effects chain.
     function connectEffects(gainNode, time) {
       let outputNode = gainNode;
       if (filterEnabled) {
@@ -315,7 +404,6 @@
       }
     }
 
-    // Play an oscillator sound with envelope and applied effects.
     function playOscillator(time, frequency, waveform, duration = 0.1) {
       const osc = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
@@ -329,7 +417,6 @@
       osc.stop(time + duration);
     }
 
-    // Play a burst of white noise with envelope and applied effects.
     function playNoise(time, duration = 0.1, vol = 0.3) {
       const bufferSize = audioContext.sampleRate * duration;
       const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
@@ -348,7 +435,6 @@
       noise.stop(time + duration);
     }
 
-    // Play instrument sounds.
     function playInstrument(instrument, time) {
       switch(instrument) {
         case "lead":
@@ -389,9 +475,9 @@
       }
     }
 
-    // ============================================
+    // ---------------------------
     // Sequencer Grid & UI Setup (Board State)
-    // ============================================
+    // ---------------------------
     const rowNames = [
       "lead", "brass", "keys", "drums", "claps",
       "hihat", "bass", "bells", "percussion",
@@ -404,9 +490,7 @@
     const secondsPerBeat = 60 / BPM;
     const stepInterval = secondsPerBeat / 4; // 16th note duration
 
-    // Loop Length Control – default to 64.
     const loopLengthSelect = document.getElementById("loopLength");
-    // Explicitly set the dropdown's value to "64" on page load.
     loopLengthSelect.value = "64";
     let loopLength = parseInt(loopLengthSelect.value);
     
@@ -427,7 +511,7 @@
     }
     updateLoopColumns();
 
-    // Create a 2D grid state (initially all false) and build the UI.
+    // Build the gridState array and UI.
     const gridState = [];
     const sequencerElement = document.getElementById("sequencer");
     for (let i = 0; i < rows; i++) {
@@ -448,7 +532,11 @@
         cell.dataset.col = j;
         cell.addEventListener("click", () => {
           gridState[i][j] = !gridState[i][j];
-          cell.classList.toggle("active", gridState[i][j]);
+          if (gridState[i][j]) {
+            cell.classList.add("active");
+          } else {
+            cell.classList.remove("active");
+          }
           const msg = {
             type: "toggle",
             row: i,
@@ -463,9 +551,9 @@
       sequencerElement.appendChild(rowDiv);
     }
 
-    // ============================================
+    // ---------------------------
     // Sequencer Scheduler
-    // ============================================
+    // ---------------------------
     let currentStep = 0;
     function scheduler() {
       const currentTime = audioContext.currentTime;
@@ -481,84 +569,11 @@
       document.querySelectorAll('.cell').forEach(cell => {
         cell.classList.remove('current');
       });
-      document.querySelectorAll(`.cell[data-col="${step}"]`).forEach(cell => {
+      document.querySelectorAll(`.cell[data-col="${step.toString()}"]`).forEach(cell => {
         cell.classList.add('current');
       });
     }
     setInterval(scheduler, stepInterval * 1000);
-
-    // ============================================
-    // WebSocket for Collaborative Sync & Initial State
-    // ============================================
-    const ws = new WebSocket("ws://" + window.location.host + "/ws");
-    ws.onopen = function() {
-      console.log("Connected to the WebSocket server.");
-      ws.send(JSON.stringify({ type: "get_state" }));
-    };
-    ws.onmessage = function(event) {
-      const message = JSON.parse(event.data);
-      if (message.type === "init") {
-        // Initialize board state and parameters.
-        for (let i = 0; i < rows; i++) {
-          gridState[i] = message.gridState[i];
-        }
-        document.querySelectorAll('.cell').forEach(cell => {
-          const row = parseInt(cell.dataset.row);
-          const col = parseInt(cell.dataset.col);
-          cell.classList.toggle("active", gridState[row][col]);
-        });
-        if (message.params) {
-          filterCutoff = message.params.filterCutoff;
-          filterQ = message.params.filterQ;
-          reverbDecay = message.params.reverbDecay;
-          volume = message.params.volume;
-          filterCutoffSlider.value = filterCutoff;
-          filterCutoffValueSpan.innerText = filterCutoff;
-          filterQSlider.value = filterQ;
-          filterQValueSpan.innerText = filterQ;
-          reverbDecaySlider.value = reverbDecay;
-          reverbDecayValueSpan.innerText = reverbDecay;
-          volumeSlider.value = volume;
-          volumeValueSpan.innerText = volume;
-          masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
-          reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
-        }
-      } else if (message.type === "toggle") {
-        const { row, col, value, userColor } = message;
-        gridState[row][col] = value;
-        document.querySelectorAll(`.cell[data-row="${row}"][data-col="${col}"]`)
-          .forEach(cell => {
-            cell.classList.toggle("active", value);
-            if (userColor) {
-              cell.style.border = `2px solid ${userColor}`;
-              setTimeout(() => {
-                cell.style.border = "";
-              }, 1000);
-            }
-          });
-      } else if (message.type === "param_update") {
-        const params = message.params;
-        if (params) {
-          filterCutoff = params.filterCutoff;
-          filterQ = params.filterQ;
-          reverbDecay = params.reverbDecay;
-          volume = params.volume;
-          filterCutoffSlider.value = filterCutoff;
-          filterCutoffValueSpan.innerText = filterCutoff;
-          filterQSlider.value = filterQ;
-          filterQValueSpan.innerText = filterQ;
-          reverbDecaySlider.value = reverbDecay;
-          reverbDecayValueSpan.innerText = reverbDecay;
-          volumeSlider.value = volume;
-          volumeValueSpan.innerText = volume;
-          masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
-          reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
-        }
-      }
-    };
-    ws.onclose = function() {
-      console.log("Disconnected from the WebSocket server.");
-    };
   </script>
 </body>
 </html>
