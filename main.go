@@ -17,6 +17,14 @@ const (
 	numCols = 64
 )
 
+// Declare the upgrader variable to upgrade HTTP connections to WebSockets.
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	// In production, you should restrict allowed origins.
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
 // Parameters holds global synthesis parameters.
 type Parameters struct {
 	FilterCutoff float64 `json:"filterCutoff"`
@@ -28,8 +36,8 @@ type Parameters struct {
 // Message represents incoming/outgoing messages.
 type Message struct {
 	Type       string  `json:"type"`
-	Row        int     `json:"row"` // always send row even if 0
-	Col        int     `json:"col"` // always send col even if 0
+	Row        int     `json:"row"` // Always send row, even if 0.
+	Col        int     `json:"col"` // Always send col, even if 0.
 	Value      bool    `json:"value"`
 	Param      string  `json:"param,omitempty"`
 	ParamValue float64 `json:"paramValue,omitempty"`
@@ -118,7 +126,7 @@ func (h *Hub) run() {
 			h.clients[client] = true
 			log.Printf("New client connected: %s (color: %s)", client.conn.RemoteAddr(), client.color)
 			h.broadcastClientCount()
-			// Send initial state to new client.
+			// Send initial state (board and parameters) to the new client.
 			initMsg := struct {
 				Type      string     `json:"type"`
 				GridState [][]bool   `json:"gridState"`
@@ -151,7 +159,7 @@ func (h *Hub) run() {
 			log.Printf("Received message from %s: %+v", im.client.conn.RemoteAddr(), msg)
 			switch msg.Type {
 			case "toggle":
-				// Validate and update board state.
+				// Update board state.
 				if msg.Row < 0 || msg.Row >= numRows || msg.Col < 0 || msg.Col >= numCols {
 					log.Printf("Toggle message out of bounds from %s: row %d, col %d", im.client.conn.RemoteAddr(), msg.Row, msg.Col)
 					continue
@@ -216,7 +224,7 @@ func (h *Hub) run() {
 	}
 }
 
-// readPump reads messages from the client.
+// readPump reads messages from the client and sends them to hub.inbound.
 func (c *Client) readPump(hub *Hub) {
 	defer func() {
 		hub.unregister <- c
@@ -233,7 +241,7 @@ func (c *Client) readPump(hub *Hub) {
 	}
 }
 
-// writePump writes messages to the client.
+// writePump writes messages from the hub to the client.
 func (c *Client) writePump() {
 	defer c.conn.Close()
 	for message := range c.send {
@@ -253,7 +261,7 @@ func randomColor() string {
 	return fmt.Sprintf("#%02X%02X%02X", r, g, b)
 }
 
-// serveWs upgrades the HTTP connection to a WebSocket.
+// serveWs upgrades the HTTP connection to a WebSocket and registers the client.
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
