@@ -25,19 +25,11 @@ type Parameters struct {
 	Volume       float64 `json:"volume"`
 }
 
-// --- WebSocket Upgrade Configuration ---
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	// In production, restrict allowed origins.
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
 // Message represents incoming/outgoing messages.
 type Message struct {
 	Type       string  `json:"type"`
-	Row        int     `json:"row"`
-	Col        int     `json:"col"`
+	Row        int     `json:"row"` // always send row even if 0
+	Col        int     `json:"col"` // always send col even if 0
 	Value      bool    `json:"value"`
 	Param      string  `json:"param,omitempty"`
 	ParamValue float64 `json:"paramValue,omitempty"`
@@ -50,14 +42,14 @@ type InboundMessage struct {
 	data   []byte
 }
 
-// --- Client Structure ---
+// Client represents a connected client.
 type Client struct {
 	conn  *websocket.Conn
 	send  chan []byte
 	color string
 }
 
-// --- Hub Structure ---
+// Hub maintains the set of active clients, the board state, and parameters.
 type Hub struct {
 	clients    map[*Client]bool
 	inbound    chan InboundMessage
@@ -67,7 +59,6 @@ type Hub struct {
 	params     Parameters
 }
 
-// newHub initializes a new hub with an empty board and default parameters.
 func newHub() *Hub {
 	h := &Hub{
 		clients:    make(map[*Client]bool),
@@ -88,12 +79,35 @@ func newHub() *Hub {
 	return h
 }
 
-// randomColor generates a random hex color code.
-func randomColor() string {
-	r := rand.Intn(256)
-	g := rand.Intn(256)
-	b := rand.Intn(256)
-	return fmt.Sprintf("#%02X%02X%02X", r, g, b)
+// broadcastClientCount sends the number of connected clients to all clients.
+func (h *Hub) broadcastClientCount() {
+	countMsg := struct {
+		Type        string `json:"type"`
+		ClientCount int    `json:"clientCount"`
+	}{
+		Type:        "client_count",
+		ClientCount: len(h.clients),
+	}
+	data, err := json.Marshal(countMsg)
+	if err != nil {
+		log.Printf("Error marshaling client count: %v", err)
+		return
+	}
+	h.broadcast(data)
+	log.Printf("Broadcasted client count: %d", len(h.clients))
+}
+
+// broadcast sends data to all connected clients.
+func (h *Hub) broadcast(data []byte) {
+	for client := range h.clients {
+		select {
+		case client.send <- data:
+		default:
+			log.Printf("Failed to send message to client %s", client.conn.RemoteAddr())
+			close(client.send)
+			delete(h.clients, client)
+		}
+	}
 }
 
 // run listens for register, unregister, and inbound messages.
@@ -102,7 +116,9 @@ func (h *Hub) run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			// Send current board state and parameters.
+			log.Printf("New client connected: %s (color: %s)", client.conn.RemoteAddr(), client.color)
+			h.broadcastClientCount()
+			// Send initial state to new client.
 			initMsg := struct {
 				Type      string     `json:"type"`
 				GridState [][]bool   `json:"gridState"`
@@ -112,40 +128,44 @@ func (h *Hub) run() {
 				GridState: h.boardState,
 				Params:    h.params,
 			}
-			if data, err := json.Marshal(initMsg); err != nil {
-				log.Println("Error marshaling init message:", err)
+			data, err := json.Marshal(initMsg)
+			if err != nil {
+				log.Printf("Error marshaling init message: %v", err)
 			} else {
 				client.send <- data
+				log.Printf("Sent init message to %s", client.conn.RemoteAddr())
 			}
-
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
+				log.Printf("Client disconnected: %s", client.conn.RemoteAddr())
 				delete(h.clients, client)
 				close(client.send)
 			}
-
+			h.broadcastClientCount()
 		case im := <-h.inbound:
 			var msg Message
 			if err := json.Unmarshal(im.data, &msg); err != nil {
-				log.Println("Error decoding message:", err)
+				log.Printf("Error decoding message from %s: %v", im.client.conn.RemoteAddr(), err)
 				continue
 			}
-
+			log.Printf("Received message from %s: %+v", im.client.conn.RemoteAddr(), msg)
 			switch msg.Type {
 			case "toggle":
-				// Update board state.
-				if msg.Row >= 0 && msg.Row < numRows && msg.Col >= 0 && msg.Col < numCols {
-					h.boardState[msg.Row][msg.Col] = msg.Value
+				// Validate and update board state.
+				if msg.Row < 0 || msg.Row >= numRows || msg.Col < 0 || msg.Col >= numCols {
+					log.Printf("Toggle message out of bounds from %s: row %d, col %d", im.client.conn.RemoteAddr(), msg.Row, msg.Col)
+					continue
 				}
-				// Set the user color from the originating client.
+				h.boardState[msg.Row][msg.Col] = msg.Value
+				// Attach the sender's color.
 				msg.UserColor = im.client.color
-				// Marshal the modified message.
-				if data, err := json.Marshal(msg); err != nil {
-					log.Println("Error marshaling toggle message:", err)
+				data, err := json.Marshal(msg)
+				if err != nil {
+					log.Printf("Error marshaling toggle message: %v", err)
 				} else {
 					h.broadcast(data)
+					log.Printf("Broadcast toggle from %s: row %d, col %d, value %t", im.client.conn.RemoteAddr(), msg.Row, msg.Col, msg.Value)
 				}
-
 			case "get_state":
 				initMsg := struct {
 					Type      string     `json:"type"`
@@ -156,14 +176,14 @@ func (h *Hub) run() {
 					GridState: h.boardState,
 					Params:    h.params,
 				}
-				if data, err := json.Marshal(initMsg); err != nil {
-					log.Println("Error marshaling init message:", err)
+				data, err := json.Marshal(initMsg)
+				if err != nil {
+					log.Printf("Error marshaling init message: %v", err)
 				} else {
 					im.client.send <- data
+					log.Printf("Sent state to %s", im.client.conn.RemoteAddr())
 				}
-
 			case "set_param":
-				// Update parameter based on msg.Param.
 				switch msg.Param {
 				case "filterCutoff":
 					h.params.FilterCutoff = msg.ParamValue
@@ -174,7 +194,6 @@ func (h *Hub) run() {
 				case "volume":
 					h.params.Volume = msg.ParamValue
 				}
-				// Broadcast new parameter state.
 				paramMsg := struct {
 					Type   string     `json:"type"`
 					Params Parameters `json:"params"`
@@ -182,33 +201,22 @@ func (h *Hub) run() {
 					Type:   "param_update",
 					Params: h.params,
 				}
-				if data, err := json.Marshal(paramMsg); err != nil {
-					log.Println("Error marshaling param update:", err)
+				data, err := json.Marshal(paramMsg)
+				if err != nil {
+					log.Printf("Error marshaling param update: %v", err)
 				} else {
 					h.broadcast(data)
+					log.Printf("Broadcast param update from %s: %+v", im.client.conn.RemoteAddr(), h.params)
 				}
-
 			default:
-				// For any other message types, broadcast.
 				h.broadcast(im.data)
+				log.Printf("Broadcast unknown message type: %s", msg.Type)
 			}
 		}
 	}
 }
 
-// broadcast sends data to all connected clients.
-func (h *Hub) broadcast(data []byte) {
-	for client := range h.clients {
-		select {
-		case client.send <- data:
-		default:
-			close(client.send)
-			delete(h.clients, client)
-		}
-	}
-}
-
-// readPump reads messages from a client and sends them to hub.inbound.
+// readPump reads messages from the client.
 func (c *Client) readPump(hub *Hub) {
 	defer func() {
 		hub.unregister <- c
@@ -217,38 +225,48 @@ func (c *Client) readPump(hub *Hub) {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
+			log.Printf("Read error from %s: %v", c.conn.RemoteAddr(), err)
 			break
 		}
+		log.Printf("Received raw message from %s: %s", c.conn.RemoteAddr(), string(message))
 		hub.inbound <- InboundMessage{client: c, data: message}
 	}
 }
 
-// writePump writes messages from the hub to a client.
+// writePump writes messages to the client.
 func (c *Client) writePump() {
 	defer c.conn.Close()
 	for message := range c.send {
 		if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			log.Printf("Write error to %s: %v", c.conn.RemoteAddr(), err)
 			break
 		}
 	}
 }
 
-// serveWs upgrades the HTTP connection to a WebSocket and registers the client.
+// randomColor returns a random hex color string.
+func randomColor() string {
+	rand.Seed(time.Now().UnixNano())
+	r := rand.Intn(256)
+	g := rand.Intn(256)
+	b := rand.Intn(256)
+	return fmt.Sprintf("#%02X%02X%02X", r, g, b)
+}
+
+// serveWs upgrades the HTTP connection to a WebSocket.
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("WebSocket upgrade error:", err)
+		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
-	// Seed random generator (ideally do this once in main or init).
-	rand.Seed(time.Now().UnixNano())
 	client := &Client{
 		conn:  conn,
 		send:  make(chan []byte, 256),
 		color: randomColor(),
 	}
 	hub.register <- client
-
+	log.Printf("Registered client: %s", client.conn.RemoteAddr())
 	go client.writePump()
 	client.readPump(hub)
 }
@@ -260,11 +278,9 @@ func main() {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(hub, w, r)
 	})
-
-	// Serve static files (frontend).
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 
-	fmt.Println("Server started on :8080")
+	log.Println("Server started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 

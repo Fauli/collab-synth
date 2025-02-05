@@ -15,13 +15,27 @@
     }
     h1 {
       text-align: center;
-      margin-bottom: 10px;
+      margin-bottom: 5px;
     }
     p {
       text-align: center;
       margin-bottom: 20px;
       font-size: 14px;
       color: #ccc;
+    }
+    /* Header with Logo and Client Count */
+    #header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    #header img {
+      max-height: 100px;
+      display: block;
+      margin: auto;
+    }
+    #clientCount {
+      font-size: 16px;
+      margin-top: 5px;
     }
     /* Controls */
     #controls, #loop-control, #params {
@@ -90,9 +104,9 @@
     .instrument-grid .cell:nth-child(4n+1):not(.active) {
       background-color: #383838;
     }
+    /* We remove the fixed green from .cell.active and rely on inline styles */
     .cell.active {
-      background-color: #00e676;
-      box-shadow: 0 0 8px #00e676;
+      box-shadow: 0 0 8px currentColor;
     }
     .cell:hover {
       box-shadow: 0 0 8px rgba(0, 230, 118, 0.5);
@@ -133,8 +147,15 @@
   </style>
 </head>
 <body>
-  <!-- Overlay to unlock audio -->
+  <!-- Audio Unlock Overlay -->
   <div id="startOverlay">Tap to Start Audio</div>
+
+  <!-- Header with Logo and Client Count -->
+  <div id="header">
+    <img src="images/logo.png" alt="Logo">
+    <div id="clientCount">Connected Clients: 0</div>
+  </div>
+
   <h1>Collaborative Synth / Step Sequencer</h1>
   <p>Click a cell to toggle it. Changes are shared in real time with all connected users.</p>
 
@@ -148,14 +169,14 @@
     </label>
   </div>
 
-  <!-- Loop Length Control -->
+  <!-- Loop Length Control: Default is now 8 -->
   <div id="loop-control">
     <label for="loopLength">Loop Length:</label>
     <select id="loopLength">
-      <option value="8">8</option>
+      <option value="8" selected>8</option>
       <option value="16">16</option>
       <option value="32">32</option>
-      <option value="64" selected>64</option>
+      <option value="64">64</option>
     </select>
   </div>
 
@@ -191,6 +212,21 @@
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
     let ws;  // Global WebSocket variable
 
+    // Emoji mapping for instrument names.
+    const instrumentEmojis = {
+      "lead": "🎸",
+      "brass": "🎺",
+      "keys": "🎹",
+      "drums": "🥁",
+      "claps": "👏",
+      "hihat": "🥁",
+      "bass": "🎸",
+      "bells": "🔔",
+      "percussion": "🎶",
+      "Kick": "👢",
+      "plucks": "🎻"
+    };
+
     // ---------------------------
     // Initialize WebSocket Connection
     // ---------------------------
@@ -211,16 +247,15 @@
             gridState[i] = message.gridState[i];
           }
           document.querySelectorAll('.cell').forEach(cell => {
-            const row = cell.dataset.row.toString();
-            const col = cell.dataset.col.toString();
-            // Safety check: ensure gridState[row] exists.
-            if (!gridState[row]) {
-              gridState[row] = new Array(cols).fill(false);
-            }
-            if (gridState[row][col]) {
+            const row = cell.dataset.row;
+            const col = cell.dataset.col;
+            if (gridState[row] && gridState[row][col]) {
               cell.classList.add("active");
+              // Set the background color to the user's color if available.
+              // (The init message does not include userColor, so leave it as default.)
             } else {
               cell.classList.remove("active");
+              cell.style.backgroundColor = "";
             }
           });
           if (message.params) {
@@ -241,18 +276,21 @@
           }
         } else if (message.type === "toggle") {
           const { row, col, value, userColor } = message;
-          // Ensure gridState[row] exists.
-          if (!gridState[row.toString()]) {
-            gridState[row.toString()] = new Array(cols).fill(false);
+          if (!gridState[row]) {
+            gridState[row] = new Array(cols).fill(false);
           }
-          gridState[row.toString()][col.toString()] = value;
-          document.querySelectorAll(`.cell[data-row="${row.toString()}"][data-col="${col.toString()}"]`)
+          gridState[row][col] = value;
+          document.querySelectorAll(`.cell[data-row="${row}"][data-col="${col}"]`)
             .forEach(cell => {
               if (value) {
                 cell.classList.add("active");
+                // Set the cell's background color to the user's color.
+                cell.style.backgroundColor = userColor;
               } else {
                 cell.classList.remove("active");
+                cell.style.backgroundColor = "";
               }
+              // Also show a transient glowing rim in the userColor.
               if (userColor) {
                 cell.style.border = `2px solid ${userColor}`;
                 setTimeout(() => {
@@ -278,6 +316,9 @@
             masterGain.gain.setValueAtTime(volume, audioContext.currentTime);
             reverbNode.buffer = createReverbImpulseResponse(reverbDecay, 2.0);
           }
+        } else if (message.type === "client_count") {
+          document.getElementById("clientCount").innerText =
+            "Connected Clients: " + message.clientCount;
         }
       };
 
@@ -490,8 +531,9 @@
     const secondsPerBeat = 60 / BPM;
     const stepInterval = secondsPerBeat / 4; // 16th note duration
 
+    // Set initial loop length to 8.
     const loopLengthSelect = document.getElementById("loopLength");
-    loopLengthSelect.value = "64";
+    loopLengthSelect.value = "8";
     let loopLength = parseInt(loopLengthSelect.value);
     
     loopLengthSelect.addEventListener("change", function() {
@@ -520,7 +562,8 @@
       rowDiv.classList.add("instrument-row");
       const labelDiv = document.createElement("div");
       labelDiv.classList.add("instrument-label");
-      labelDiv.innerText = rowNames[i];
+      // Prepend matching emoji to instrument name.
+      labelDiv.innerText = (instrumentEmojis[rowNames[i]] || "") + " " + rowNames[i];
       rowDiv.appendChild(labelDiv);
       const rowGrid = document.createElement("div");
       rowGrid.classList.add("instrument-grid");
@@ -531,17 +574,12 @@
         cell.dataset.row = i;
         cell.dataset.col = j;
         cell.addEventListener("click", () => {
-          gridState[i][j] = !gridState[i][j];
-          if (gridState[i][j]) {
-            cell.classList.add("active");
-          } else {
-            cell.classList.remove("active");
-          }
+          // Do not update the UI immediately; wait for the server's broadcast.
           const msg = {
             type: "toggle",
             row: i,
             col: j,
-            value: gridState[i][j]
+            value: !gridState[i][j]
           };
           ws.send(JSON.stringify(msg));
         });
