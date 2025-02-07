@@ -6,7 +6,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -254,7 +253,6 @@ func (c *Client) writePump() {
 
 // randomColor returns a random hex color string.
 func randomColor() string {
-	rand.Seed(time.Now().UnixNano())
 	r := rand.Intn(256)
 	g := rand.Intn(256)
 	b := rand.Intn(256)
@@ -291,4 +289,3 @@ func main() {
 	log.Println("Server started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
-
